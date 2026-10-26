@@ -13,11 +13,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"go.opentelemetry.io/collector/client"
 )
 
 const (
-	ingestedTag    = "otel-collector:status"
-	ingestedStatus = "ingested"
+	ingestedTag         = "otel-collector:status"
+	ingestedStatus      = "ingested"
+	awsS3MetadataBucket = "aws.s3.bucket"
+	awsS3MetadataKey    = "aws.s3.key"
 )
 
 type ListObjectsV2Pager interface {
@@ -70,16 +73,16 @@ func (api *s3ListObjectsAPIImpl) NewListObjectsV2Paginator(params *s3.ListObject
 
 // retrieveS3Object retrieves S3 object content for a given bucket and key.
 // The caller must close the returned body.
-func retrieveS3Object(ctx context.Context, client SingleObjectAPI, bucket, key string) (io.ReadCloser, error) {
+func retrieveS3Object(ctx context.Context, client SingleObjectAPI, bucket, key string) (io.ReadCloser, map[string]string, error) {
 	params := s3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 	}
 	output, err := client.GetObject(ctx, &params)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return output.Body, nil
+	return output.Body, output.Metadata, nil
 }
 
 func processS3Object(ctx context.Context, key string, body io.ReadCloser, callback s3ObjectCallback) (err error) {
@@ -125,4 +128,18 @@ func hasIngestedTag(ctx context.Context, client SingleObjectAPI, bucket, key str
 		}
 	}
 	return false, nil
+}
+
+// getEnrichedContext creates a new context with metadata extracted from the S3 event,
+// which can be used for further processing and correlation in the pipeline.
+func getEnrichedCtx(ctx context.Context, objMetadata map[string]string) context.Context {
+	metadata := map[string][]string{}
+
+	for k, v := range objMetadata {
+		metadata[k] = []string{v}
+	}
+
+	info := client.Info{}
+	info.Metadata = client.NewMetadata(metadata)
+	return client.NewContext(ctx, info)
 }
