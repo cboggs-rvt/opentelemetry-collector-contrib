@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/client"
 	"go.uber.org/zap"
 )
 
@@ -33,15 +34,17 @@ func (m *mockS3ClientSQS) GetObject(ctx context.Context, params *s3.GetObjectInp
 		return nil, args.Error(1)
 	}
 
-	// If test wants to return content, wrap it in a ReadCloser
-	content, ok := args.Get(0).([]byte)
-	if !ok {
-		return nil, errors.New("unexpected type for mock GetObject content")
+	switch content := args.Get(0).(type) {
+	case []byte:
+		// If test wants to return content, wrap it in a ReadCloser
+		return &s3.GetObjectOutput{
+			Body: io.NopCloser(strings.NewReader(string(content))),
+		}, args.Error(1)
+	case *s3.GetObjectOutput:
+		// If test wants to return a full object struct, pass it along
+		return content, args.Error(1)
 	}
-
-	return &s3.GetObjectOutput{
-		Body: io.NopCloser(strings.NewReader(string(content))),
-	}, args.Error(1)
+	return nil, errors.New("unexpected type for mock GetObject content")
 }
 
 func (m *mockS3ClientSQS) GetObjectTagging(ctx context.Context, params *s3.GetObjectTaggingInput, _ ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
@@ -234,7 +237,10 @@ func TestS3SQSReader_ReadAll(t *testing.T) {
 		Bucket: aws.String("test-bucket"),
 		Key:    aws.String("test-key"),
 	}).Return(
-		[]byte("test-content"),
+		&s3.GetObjectOutput{
+			Body:     io.NopCloser(strings.NewReader("test-content")),
+			Metadata: map[string]string{"svc-name": "test-svc"},
+		},
 		nil,
 	)
 
@@ -261,11 +267,13 @@ func TestS3SQSReader_ReadAll(t *testing.T) {
 	var callbackCallCount int
 	var receivedKeys []string
 	var receivedContents [][]byte
+	var receivedMetadata []client.Metadata
 
-	err = reader.readAll(ctx, "test-telemetry", func(_ context.Context, key string, content []byte) error {
+	err = reader.readAll(ctx, "test-telemetry", func(callbackCtx context.Context, key string, content []byte) error {
 		callbackCallCount++
 		receivedKeys = append(receivedKeys, key)
 		receivedContents = append(receivedContents, content)
+		receivedMetadata = append(receivedMetadata, client.FromContext(callbackCtx).Metadata)
 		return nil
 	})
 
@@ -279,6 +287,15 @@ func TestS3SQSReader_ReadAll(t *testing.T) {
 	assert.Equal(t, []byte("test-content"), receivedContents[0])
 	assert.Equal(t, "url-encoding=test-key", receivedKeys[1])
 	assert.Equal(t, []byte("url-encoded-content"), receivedContents[1])
+
+	require.Len(t, receivedMetadata, 2)
+	assert.Equal(t, []string{"test-bucket"}, receivedMetadata[0].Get(awsS3MetadataBucket))
+	assert.Equal(t, []string{"test-key"}, receivedMetadata[0].Get(awsS3MetadataKey))
+	assert.Equal(t, []string{"test-svc"}, receivedMetadata[0].Get("svc-name"))
+
+	assert.Equal(t, []string{"test-bucket"}, receivedMetadata[1].Get(awsS3MetadataBucket))
+	assert.Equal(t, []string{"url-encoding=test-key"}, receivedMetadata[1].Get(awsS3MetadataKey))
+	assert.Nil(t, receivedMetadata[1].Get("source"))
 
 	// Verify all expectations
 	mockS3.AssertExpectations(t)
@@ -400,6 +417,9 @@ func TestS3SQSReader_ReadAllDirectS3EventNotification(t *testing.T) {
 	assert.True(t, callbackCalled)
 	assert.Equal(t, "test-key", receivedKey)
 	assert.Equal(t, []byte("test-trace-data"), receivedContent)
+	// assert.Equal(t, "test-bucket", receivedMetadata.Get(awsS3MetadataBucket)[0])
+	// assert.Equal(t, "test-key", receivedMetadata.Get(awsS3MetadataKey)[0])
+	// assert.Equal(t, "userVal", receivedMetadata.Get("userKey")[0])
 
 	// Verify all expectations
 	mockS3.AssertExpectations(t)

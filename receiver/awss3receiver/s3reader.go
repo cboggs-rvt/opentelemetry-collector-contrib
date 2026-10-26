@@ -163,13 +163,20 @@ func (s3Reader *s3TimeBasedReader) readTelemetryForTime(ctx context.Context, t t
 					}
 				}
 
-				data, err := retrieveS3Object(ctx, s3Reader.singleObjectClient, s3Reader.s3Bucket, *obj.Key)
+				data, objMetadata, err := retrieveS3Object(ctx, s3Reader.singleObjectClient, s3Reader.s3Bucket, *obj.Key)
 				if err != nil {
 					return err
 				}
 
 				s3Reader.logger.Debug("Retrieved telemetry", zap.String("key", *obj.Key))
-				if callbackErr := dataCallback(ctx, *obj.Key, data); callbackErr != nil {
+
+				if objMetadata == nil {
+					objMetadata = map[string]string{}
+				}
+				objMetadata[awsS3MetadataBucket] = s3Reader.s3Bucket
+				objMetadata[awsS3MetadataKey] = *obj.Key
+
+				if callbackErr := dataCallback(getEnrichedCtx(ctx, objMetadata), *obj.Key, data); callbackErr != nil {
 					return callbackErr
 				}
 

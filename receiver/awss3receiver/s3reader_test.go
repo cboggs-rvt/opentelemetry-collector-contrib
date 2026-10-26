@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.uber.org/zap"
 )
@@ -245,6 +246,9 @@ func (m *mockListObjectsV2Pager) NextPage(_ context.Context, _ ...func(*s3.Optio
 func Test_readTelemetryForTime(t *testing.T) {
 	testKey1 := "year=2021/month=02/day=01/hour=17/minute=32/traces_1"
 	testKey2 := "year=2021/month=02/day=01/hour=17/minute=32/traces_2"
+	objectMetadata := map[string]map[string]string{
+		testKey1: {"svc-name": "test-svc"},
+	}
 	reader := s3TimeBasedReader{
 		listObjectsClient: mockListObjectsAPI(func(params *s3.ListObjectsV2Input) ListObjectsV2Pager {
 			t.Helper()
@@ -276,7 +280,8 @@ func Test_readTelemetryForTime(t *testing.T) {
 				require.Equal(t, "bucket", *params.Bucket)
 				require.Contains(t, []string{testKey1, testKey2}, *params.Key)
 				return &s3.GetObjectOutput{
-					Body: io.NopCloser(bytes.NewReader([]byte("this is the body of the object"))),
+					Body:     io.NopCloser(bytes.NewReader([]byte("this is the body of the object"))),
+					Metadata: objectMetadata[*params.Key],
 				}, nil
 			},
 		},
@@ -292,16 +297,26 @@ func Test_readTelemetryForTime(t *testing.T) {
 	}
 
 	dataCallbackKeys := make([]string, 0)
+	receivedMetadata := map[string]client.Metadata{}
 
-	err := reader.readTelemetryForTime(t.Context(), testTime, "traces", func(_ context.Context, key string, data []byte) error {
+	err := reader.readTelemetryForTime(t.Context(), testTime, "traces", func(ctx context.Context, key string, data []byte) error {
 		t.Helper()
 		require.Equal(t, "this is the body of the object", string(data))
 		dataCallbackKeys = append(dataCallbackKeys, key)
+		receivedMetadata[key] = client.FromContext(ctx).Metadata
 		return nil
 	})
 	require.Contains(t, dataCallbackKeys, testKey1)
 	require.Contains(t, dataCallbackKeys, testKey2)
 	require.NoError(t, err)
+
+	require.Equal(t, []string{"bucket"}, receivedMetadata[testKey1].Get(awsS3MetadataBucket))
+	require.Equal(t, []string{testKey1}, receivedMetadata[testKey1].Get(awsS3MetadataKey))
+	require.Equal(t, []string{"test-svc"}, receivedMetadata[testKey1].Get("svc-name"))
+
+	require.Equal(t, []string{"bucket"}, receivedMetadata[testKey2].Get(awsS3MetadataBucket))
+	require.Equal(t, []string{testKey2}, receivedMetadata[testKey2].Get(awsS3MetadataKey))
+	require.Nil(t, receivedMetadata[testKey2].Get("source"))
 }
 
 func Test_readTelemetryForTime_skipTaggedObjects(t *testing.T) {

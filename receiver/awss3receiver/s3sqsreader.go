@@ -232,7 +232,8 @@ func (r *s3SQSNotificationReader) readAll(ctx context.Context, _ string, callbac
 					}
 
 					var content []byte
-					content, err = retrieveS3Object(ctx, r.s3Client, bucket, decodedKey)
+					var objMetadata map[string]string
+					content, objMetadata, err = retrieveS3Object(ctx, r.s3Client, bucket, decodedKey)
 					if err != nil {
 						r.logger.Warn("Failed to get S3 object",
 							zap.String("bucket", bucket),
@@ -246,7 +247,13 @@ func (r *s3SQSNotificationReader) readAll(ctx context.Context, _ string, callbac
 						continue
 					}
 
-					err = callback(ctx, decodedKey, content)
+					if objMetadata == nil {
+						objMetadata = map[string]string{}
+					}
+					objMetadata[awsS3MetadataBucket] = bucket
+					objMetadata[awsS3MetadataKey] = decodedKey
+
+					err = callback(getEnrichedCtx(ctx, objMetadata), decodedKey, content)
 					if err != nil {
 						r.logger.Error("Failed to process S3 object content",
 							zap.String("key", decodedKey),
